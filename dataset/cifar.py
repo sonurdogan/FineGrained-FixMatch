@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from torchvision import datasets
 from torchvision import transforms
-from .fly import get_fly
+from .fly import get_fly, get_fly_fine
 from .randaugment import RandAugmentMC
 
 logger = logging.getLogger(__name__)
@@ -180,4 +180,4 @@ class CIFAR100SSL(datasets.CIFAR100):
 
 DATASET_GETTERS = {'cifar10': get_cifar10,
                    'cifar100': get_cifar100,
-                   'fly': get_fly}
+                   'fly': get_fly_fine}

@@ -101,7 +101,7 @@ def main():
                         help='use EMA model')
     parser.add_argument('--ema-decay', default=0.999, type=float,
                         help='EMA decay rate')
-    parser.add_argument('--mu', default=7, type=int,
+    parser.add_argument('--mu', default=20, type=int,
                         help='coefficient of unlabeled batch size')
     parser.add_argument('--lambda-u', default=1, type=float,
                         help='coefficient of unlabeled loss')
@@ -199,7 +199,7 @@ def main():
             args.model_depth = 29
             args.model_width = 64
     elif args.dataset == 'fly':
-        args.num_classes = 3
+        args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
             args.model_width = 2
@@ -323,6 +323,19 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
     labeled_iter = iter(labeled_trainloader)
     unlabeled_iter = iter(unlabeled_trainloader)
+    
+    # Fine to coarse mapping (edit this as needed)
+    fine_to_coarse = [0, 0, 0, 1, 1, 1, 1, 1, 2, 2]  # len = 10
+
+    # Initialize zero matrix (10 fine × 3 coarse)
+    M = torch.zeros((10, 3), dtype=torch.float32)
+    M = M.to(args.device)
+
+    # Set appropriate positions to 1
+    for fine_label, coarse_label in enumerate(fine_to_coarse):
+        M[fine_label, coarse_label] = 1.0
+
+    print("our M matrix: ", M)
 
     model.train()
     for epoch in range(args.start_epoch, args.epochs):
@@ -331,6 +344,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         losses = AverageMeter()
         losses_x = AverageMeter()
         losses_u = AverageMeter()
+        losses_coarse = AverageMeter()
         mask_probs = AverageMeter()
         if not args.no_progress:
             p_bar = tqdm(range(args.eval_step),
@@ -346,30 +360,42 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 inputs_x, targets_x = next(labeled_iter)
 
             try:
-                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s, inputs_coarse), target_coarse = next(unlabeled_iter)
             except:
                 if args.world_size > 1:
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s, inputs_coarse), target_coarse = next(unlabeled_iter)
 
             data_time.update(time.time() - end)
             batch_size = inputs_x.shape[0]
             inputs = interleave(
-                torch.cat((inputs_x, inputs_u_w, inputs_u_s)), 2*args.mu+1).to(args.device)
+                torch.cat((inputs_x, inputs_coarse, inputs_u_w, inputs_u_s)), 3*args.mu+1).to(args.device)
             # TODO
             #inputs = interleave(
             #    torch.cat((inputs_x, inputs_finegrained, inputs_u_w, inputs_u_s)), 2*args.mu+1).to(args.device)
             # logits_x, logits_finegraind = logits[batch_size:].chunk(2)
+            labeled_targets_coarse = targets_x[:, 0]
+            targets_x = targets_x[:, 1]
             targets_x = targets_x.to(args.device)
-            logits = model(inputs)
-            logits = de_interleave(logits, 2*args.mu+1)
-            logits_x = logits[:batch_size]
-            logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
-            del logits
+            labeled_targets_coarse = labeled_targets_coarse.to(args.device)
 
+            logits = model(inputs)
+            logits = de_interleave(logits, 3*args.mu+1)
+            logits_x = logits[:batch_size]
+            logits_coarse = logits[:batch_size+(batch_size*args.mu)]
+            logits_u_w, logits_u_s = logits[batch_size+(batch_size*args.mu):].chunk(2)
+            
+            del logits
+            
             Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
+            
+            logits_coarse = logits_coarse @ M  
+            target_coarse = target_coarse[:,0]
+            target_coarse = target_coarse.to(args.device)
+            targets_coarse = torch.cat((labeled_targets_coarse,target_coarse))
+            Lcoarse = F.cross_entropy(logits_coarse, targets_coarse, reduction='mean')
 
             pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
@@ -378,7 +404,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             Lu = (F.cross_entropy(logits_u_s, targets_u,
                                   reduction='none') * mask).mean()
             # LOSS
-            loss = Lx + args.lambda_u * Lu
+            loss = Lx + args.lambda_u * Lu + 0.3 * Lcoarse
 
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -389,6 +415,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             losses.update(loss.item())
             losses_x.update(Lx.item())
             losses_u.update(Lu.item())
+            losses_coarse.update(Lcoarse.item())
             optimizer.step()
             scheduler.step()
             if args.use_ema:
@@ -399,7 +426,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             end = time.time()
             mask_probs.update(mask.mean().item())
             if not args.no_progress:
-                p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. Mask: {mask:.2f}. ".format(
+                p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. Loss_coarse: {loss_coarse:.4f}. Mask: {mask:.2f}. ".format(
                     epoch=epoch + 1,
                     epochs=args.epochs,
                     batch=batch_idx + 1,
@@ -410,6 +437,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     loss=losses.avg,
                     loss_x=losses_x.avg,
                     loss_u=losses_u.avg,
+                    loss_coarse = losses_coarse.avg,
                     mask=mask_probs.avg))
                 p_bar.update()
 
@@ -475,11 +503,12 @@ def test(args, test_loader, model, epoch):
             model.eval()
 
             inputs = inputs.to(args.device)
+            targets = targets[:,1]
             targets = targets.to(args.device)
             outputs = model(inputs)
             loss = F.cross_entropy(outputs, targets)
 
-            prec1, prec5 = accuracy(outputs, targets, topk=(1, 3))
+            prec1, prec5 = accuracy(outputs, targets, topk=(1, int(args.num_classes/2)))
             losses.update(loss.item(), inputs.shape[0])
             top1.update(prec1.item(), inputs.shape[0])
             top5.update(prec5.item(), inputs.shape[0])
