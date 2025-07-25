@@ -30,18 +30,18 @@ def get_fly(args, root):
         transforms.Normalize(mean=normal_mean, std=normal_std)
     ])
 
-    labeled_data_path = root + "labeled/images"
-    labeled_target_path = root + "labeled/labels"
-    unlabeled_data_path = root + "unlabeled/images"
-    test_data_path = root + "test/images"
-    test_target_path = root + "test/labels"
+    labeled_data_path = root + "/labeled/images"
+    labeled_target_path = root + "/labeled/labels"
+    unlabeled_data_path = root + "/unlabeled/images"
+    test_data_path = root + "/test/images"
+    test_target_path = root + "/test/labels"
 
     train_labeled_dataset = FLYSSL(
-        root, labeled_data_path, labeled_target_path, labeled=True, train=True,
+        root, labeled_data_path, labeled_target_path, labeled=True,
         transform=transform_labeled)
 
     train_unlabeled_dataset = FLYSSL(
-        root, unlabeled_data_path, train=True,
+        root, unlabeled_data_path,
         transform=TransformFixMatch(mean=normal_mean, std=normal_std))
 
     test_dataset = FLYSSL(

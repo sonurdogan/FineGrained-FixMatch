@@ -479,7 +479,7 @@ def test(args, test_loader, model, epoch):
             outputs = model(inputs)
             loss = F.cross_entropy(outputs, targets)
 
-            prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
+            prec1, prec5 = accuracy(outputs, targets, topk=(1, 3))
             losses.update(loss.item(), inputs.shape[0])
             top1.update(prec1.item(), inputs.shape[0])
             top5.update(prec5.item(), inputs.shape[0])
